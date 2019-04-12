@@ -1,0 +1,324 @@
+{
+  "$schema": "https://vega.github.io/schema/vega/v3.0.json",
+  "data": [
+    {
+      "name": "rawData",
+      "url": {
+        "%context%": true,
+        "%timefield%": "@timestamp",
+        "index": "logstash-flow-*",
+        "body": {
+          "size": 10,
+          "aggs": {
+            "table": {
+              "composite": {
+                "size": 1000,
+                "sources": [
+                  {"stk1": {"terms": {"field": "src_ip.keyword"}}},
+                  {"stk2": {"terms": {"field": "dest_ip.keyword"}}}
+                ]
+              }
+            }
+          }
+        }
+      },
+      "format": {"property": "aggregations.table.buckets"},
+      "transform": [
+        {"type": "formula", "expr": "datum.key.stk1", "as": "stk1"},
+        {"type": "formula", "expr": "datum.key.stk2", "as": "stk2"},
+        {"type": "formula", "expr": "datum.doc_count", "as": "size"}
+      ]
+    },
+    {
+      "name": "nodes",
+      "source": "rawData",
+      "transform": [
+        {
+          "type": "filter",
+          "expr": "!groupSelector || groupSelector.stk1 == datum.stk1 || groupSelector.stk2 == datum.stk2"
+        },
+        {"type": "formula", "expr": "datum.stk1+datum.stk2", "as": "key"},
+        {"type": "fold", "fields": ["stk1", "stk2"], "as": ["stack", "grpId"]},
+        {
+          "type": "formula",
+          "expr": "datum.stack == 'stk1' ? datum.stk1+datum.stk2 : datum.stk2+datum.stk1",
+          "as": "sortField"
+        },
+        {
+          "type": "stack",
+          "groupby": ["stack"],
+          "sort": {"field": "sortField", "order": "descending"},
+          "field": "size"
+        },
+        {"type": "formula", "expr": "(datum.y0+datum.y1)/2", "as": "yc"}
+      ]
+    },
+    {
+      "name": "groups",
+      "source": "nodes",
+      "transform": [
+        {
+          "type": "aggregate",
+          "groupby": ["stack", "grpId"],
+          "fields": ["size"],
+          "ops": ["sum"],
+          "as": ["total"]
+        },
+        {
+          "type": "stack",
+          "groupby": ["stack"],
+          "sort": {"field": "grpId", "order": "descending"},
+          "field": "total"
+        },
+        {"type": "formula", "expr": "scale('y', datum.y0)", "as": "scaledY0"},
+        {"type": "formula", "expr": "scale('y', datum.y1)", "as": "scaledY1"},
+        {"type": "formula", "expr": "datum.stack == 'stk1'", "as": "rightLabel"},
+        {
+          "type": "formula",
+          "expr": "datum.total/domain('y')[1]",
+          "as": "percentage"
+        }
+      ]
+    },
+    {
+      "name": "destinationNodes",
+      "source": "nodes",
+      "transform": [{"type": "filter", "expr": "datum.stack == 'stk2'"}]
+    },
+    {
+      "name": "edges",
+      "source": "nodes",
+      "transform": [
+        {"type": "filter", "expr": "datum.stack == 'stk1'"},
+        {
+          "type": "lookup",
+          "from": "destinationNodes",
+          "key": "key",
+          "fields": ["key"],
+          "as": ["target"]
+        },
+        {
+          "type": "linkpath",
+          "orient": "horizontal",
+          "shape": "diagonal",
+          "sourceY": {"expr": "scale('y', datum.yc)"},
+          "sourceX": {"expr": "scale('x', 'stk1') + bandwidth('x')"},
+          "targetY": {"expr": "scale('y', datum.target.yc)"},
+          "targetX": {"expr": "scale('x', 'stk2')"}
+        },
+        {
+          "type": "formula",
+          "expr": "range('y')[0]-scale('y', datum.size)",
+          "as": "strokeWidth"
+        },
+        {
+          "type": "formula",
+          "expr": "datum.size/domain('y')[1]",
+          "as": "percentage"
+        }
+      ]
+    }
+  ],
+  "scales": [
+    {
+      "name": "x",
+      "type": "band",
+      "range": "width",
+      "domain": ["stk1", "stk2"],
+      "paddingOuter": 0.01,
+      "paddingInner": 0.98
+    },
+    {
+      "name": "y",
+      "type": "linear",
+      "range": "height",
+      "domain": {"data": "nodes", "field": "y1"}
+    },
+    {
+      "name": "color",
+      "type": "ordinal",
+      "range": "category",
+      "domain": {"data": "rawData", "field": "stk1"}
+    },
+    {
+      "name": "stackNames",
+      "type": "ordinal",
+      "range": ["Client", "Server"],
+      "domain": ["stk1", "stk2"]
+    }
+  ],
+  "axes": [
+    {
+      "orient": "bottom",
+      "scale": "x",
+      "encode": {
+        "labels": {
+          "update": {
+            "text": {"scale": "stackNames", "field": "value"},
+            "fontSize": {"value": 14}
+          }
+        }
+      }
+    },
+    {
+      "orient": "left",
+      "scale": "y",
+      "encode": {"labels": {"update": {"fontSize": {"value": 12}}}}
+    }
+  ],
+  "marks": [
+    {
+      "type": "path",
+      "name": "edgeMark",
+      "from": {"data": "edges"},
+      "clip": true,
+      "encode": {
+        "update": {
+          "stroke": [
+            {
+              "test": "groupSelector && groupSelector.stack=='stk1'",
+              "scale": "color",
+              "field": "stk2"
+            },
+            {"scale": "color", "field": "stk1"}
+          ],
+          "strokeWidth": {"field": "strokeWidth"},
+          "path": {"field": "path"},
+          "strokeOpacity": {
+            "signal": "!groupSelector && (groupHover.stk1 == datum.stk1 || groupHover.stk2 == datum.stk2) ? 0.75 : 0.3"
+          },
+          "zindex": {
+            "signal": "!groupSelector && (groupHover.stk1 == datum.stk1 || groupHover.stk2 == datum.stk2) ? 1 : 0"
+          },
+          "tooltip": {
+            "signal": "datum.stk1 + ' ? ' + datum.stk2 + '    ' + format(datum.size, ',.0f') + '   (' + format(datum.percentage, '.1%') + ')'"
+          }
+        },
+        "hover": {"strokeOpacity": {"value": 0.75}}
+      }
+    },
+    {
+      "type": "rect",
+      "name": "groupMark",
+      "from": {"data": "groups"},
+      "encode": {
+        "enter": {
+          "fill": {"scale": "color", "field": "grpId"},
+          "width": {"scale": "x", "band": 1}
+        },
+        "update": {
+          "x": {"scale": "x", "field": "stack"},
+          "y": {"field": "scaledY0"},
+          "y2": {"field": "scaledY1"},
+          "fillOpacity": {"value": 0.7},
+          "tooltip": {
+            "signal": "datum.grpId + '   ' + format(datum.total, ',.0f') + '   (' + format(datum.percentage, '.1%') + ')'"
+          }
+        },
+        "hover": {"fillOpacity": {"value": 1}}
+      }
+    },
+    {
+      "type": "text",
+      "from": {"data": "groups"},
+      "interactive": false,
+      "encode": {
+        "update": {
+          "x": {
+            "signal": "scale('x', datum.stack) + (datum.rightLabel ? bandwidth('x') + 8 : -8)"
+          },
+          "yc": {"signal": "(datum.scaledY0 + datum.scaledY1)/2"},
+          "align": {"signal": "datum.rightLabel ? 'left' : 'right'"},
+          "baseline": {"value": "middle"},
+          "fontWeight": {"value": "bold"},
+          "fontSize": {"value": 12},
+          "text": {
+            "signal": "abs(datum.scaledY0-datum.scaledY1) > 10 ? datum.grpId : ''"
+          }
+        }
+      }
+    },
+    {
+      "type": "group",
+      "data": [
+        {
+          "name": "dataForShowAll",
+          "values": [{}],
+          "transform": [{"type": "filter", "expr": "groupSelector"}]
+        }
+      ],
+      "encode": {
+        "enter": {
+          "xc": {"signal": "width/2"},
+          "y": {"value": 30},
+          "width": {"value": 100},
+          "height": {"value": 36}
+        }
+      },
+      "marks": [
+        {
+          "type": "group",
+          "name": "groupReset",
+          "from": {"data": "dataForShowAll"},
+          "encode": {
+            "enter": {
+              "cornerRadius": {"value": 3.5},
+              "fill": {"value": "#666666"},
+              "height": {"field": {"group": "height"}},
+              "width": {"field": {"group": "width"}}
+            },
+            "update": {"opacity": {"value": 1}},
+            "hover": {"fill": {"value": "#444444"}}
+          },
+          "marks": [
+            {
+              "type": "text",
+              "interactive": false,
+              "encode": {
+                "enter": {
+                  "xc": {"field": {"group": "width"}, "mult": 0.5},
+                  "yc": {"field": {"group": "height"}, "mult": 0.5, "offset": 1},
+                  "align": {"value": "center"},
+                  "baseline": {"value": "middle"},
+                  "text": {"value": "Show All"},
+                  "fontSize": {"value": 14},
+                  "stroke": {"value": "#ecf0f1"}
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "signals": [
+    {
+      "name": "groupHover",
+      "value": {},
+      "on": [
+        {
+          "events": "@groupMark:mouseover",
+          "update": "{stk1:datum.stack=='stk1' && datum.grpId, stk2:datum.stack=='stk2' && datum.grpId}"
+        },
+        {"events": "mouseout", "update": "{}"}
+      ]
+    },
+    {
+      "name": "groupSelector",
+      "value": false,
+      "on": [
+        {
+          "events": "@groupMark:click!",
+          "update": "{stack:datum.stack, stk1:datum.stack=='stk1' && datum.grpId, stk2:datum.stack=='stk2' && datum.grpId}"
+        },
+        {
+          "events": [
+            {"type": "click", "markname": "groupReset"},
+            {"type": "dblclick"}
+          ],
+          "update": "false"
+        }
+      ]
+    }
+  ]
+}
